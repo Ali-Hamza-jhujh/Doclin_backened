@@ -55,51 +55,46 @@ else:
     log.info("Groq ready with %d key(s).", len(GROQ_KEYS))
 
 # ── EasyOCR — grouped by script, since EasyOCR cannot mix incompatible scripts ──
-# Each script group must be loaded as its own Reader.
-log.info("Loading EasyOCR readers (split by script group)…")
+# Each script group is its own Reader. To avoid loading all readers into memory
+# at startup (which can OOM on small instances), readers are created lazily on
+# first use and cached.
+log.info("EasyOCR readers will be lazy-loaded on first use (per script group).")
 
-OCR_READER_LATIN = easyocr.Reader(
-    [
+_OCR_READER_CACHE: dict[str, "easyocr.Reader"] = {}
+
+_READER_LANG_GROUPS = {
+    "latin": [
         "en", "fr", "de", "es", "pt", "it", "nl", "pl", "sv", "da",
         "no", "cs", "sk", "hu", "ro", "hr", "tr", "id", "ms",
         "vi", "tl",
     ],
-    gpu=False,
-    verbose=False,
-)
-
-OCR_READER_ARABIC = easyocr.Reader(
-    ["ar", "fa", "ur", "en"],
-    gpu=False,
-    verbose=False,
-)
-
-OCR_READER_HINDI = easyocr.Reader(
-    ["hi", "en"],
-    gpu=False,
-    verbose=False,
-)
-
-OCR_READER_CHINESE = easyocr.Reader(
-    ["ch_sim", "en"],
-    gpu=False,
-    verbose=False,
-)
-
-# Default reader (used when language hint not provided / "english")
-OCR_READER = OCR_READER_LATIN
-
-# Map incoming "language" form field to the right reader
-LANGUAGE_READER_MAP = {
-    "english":  OCR_READER_LATIN,
-    "urdu":     OCR_READER_ARABIC,
-    "arabic":   OCR_READER_ARABIC,
-    "persian":  OCR_READER_ARABIC,
-    "hindi":    OCR_READER_HINDI,
-    "chinese":  OCR_READER_CHINESE,
+    "arabic":  ["ar", "fa", "ur", "en"],
+    "hindi":   ["hi", "en"],
+    "chinese": ["ch_sim", "en"],
 }
 
-log.info("EasyOCR ready — 4 script-group readers loaded.")
+# Map incoming "language" form field to the script group key
+LANGUAGE_GROUP_MAP = {
+    "english":  "latin",
+    "urdu":     "arabic",
+    "arabic":   "arabic",
+    "persian":  "arabic",
+    "hindi":    "hindi",
+    "chinese":  "chinese",
+}
+
+
+def _get_ocr_reader(group: str) -> "easyocr.Reader":
+    """Lazily create and cache an EasyOCR reader for the given script group."""
+    if group not in _OCR_READER_CACHE:
+        log.info("Loading EasyOCR reader for script group '%s'…", group)
+        _OCR_READER_CACHE[group] = easyocr.Reader(
+            _READER_LANG_GROUPS[group],
+            gpu=False,
+            verbose=False,
+        )
+        log.info("EasyOCR reader '%s' ready.", group)
+    return _OCR_READER_CACHE[group]
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(title="Docling Pro", version="6.0.0")
@@ -358,7 +353,8 @@ def _enhance_image_for_form(path: Path) -> Path:
 # ─────────────────────────────────────────────────────────────────────────────
 def run_ocr(file_path: Path, language: str = "english") -> str:
     suffix = file_path.suffix.lower()
-    reader = LANGUAGE_READER_MAP.get(language.lower().strip(), OCR_READER_LATIN)
+    group  = LANGUAGE_GROUP_MAP.get(language.lower().strip(), "latin")
+    reader = _get_ocr_reader(group)
 
     if suffix in {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"}:
         # Detect large/dense images (likely printed forms, challans, scanned docs)
